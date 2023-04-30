@@ -1,0 +1,238 @@
+- hosts: all
+  become: yes
+  
+  vars:
+    db_user: sonarqube
+    db_name: sonarqube
+    db_password: Password
+
+  handlers:
+    - name: restart apache2
+      service: name=apache2 state=restarted
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+  tasks:
+    - name: Install Required Packages
+      apt:
+        update_cache: yes
+        name:
+          - openjdk-17-jdk
+          - acl
+          - python3-pip
+          - python3-dev
+          - software-properties-common
+          - wget
+          - nginx
+    
+    - name: Make sure psycopg2-binary is installed
+      pip:
+        name: psycopg2-binary
+        state: present
+
+    - name: Add PostgreSQL GPG key
+      become: yes
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+
+    - name: Add PostgreSQL repository
+      become: yes
+      apt_repository:
+        repo: 'deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main'
+        state: present
+        filename: postgresql
+        update_cache: yes
+
+    - name: install the PostgreSQL database v13
+      apt:
+        update_cache: yes
+        name:
+          - postgresql-13
+
+    - name: Ensure the PostgreSQL service is running
+      service: name=postgresql state=started enabled=yes
+
+
+    - name: Create the database specified in vars
+      become: true
+      become_user: postgres
+      postgresql_db:
+        name={{ db_name }}
+        state=present
+      tags: psql
+
+    - name: Ensure user has access to the new database
+      become: true
+      become_user: postgres
+      postgresql_user:
+        db={{ db_name }}
+        name={{ db_user }}
+        password={{ db_password }}
+        role_attr_flags=SUPERUSER,CREATEDB,CREATEROLE,LOGIN
+        state=present
+      
+    - name: Create sonarqube user
+      user:
+        name: sonarqube
+        home: /opt/sonarqube
+        shell: /bin/bash
+
+    - name: Edit sysctl.conf file
+      lineinfile:
+        path: /etc/sysctl.conf
+        line: "{{ item }}"
+        insertafter: EOF
+        state: present
+      with_items:
+        - "vm.max_map_count=524288"
+        - "fs.file-max=131072"
+
+    - name: Apply sysctl settings
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+      loop:
+        - { name: 'vm.max_map_count', value: '524288' }
+        - { name: 'fs.file-max', value: '131072' }
+
+    - name: Create limits file for sonarqube
+      copy:
+        dest: /etc/security/limits.d/99-sonarqube.conf
+        content: |
+          sonarqube   -   nofile   131072
+          sonarqube   -   nproc    8192
+
+    - name: Create sonarqube directory
+      ansible.builtin.file:
+        path: /opt/sonarqube
+        state: directory
+
+    - name: Synchronize sonarqube source code files
+      synchronize:
+        src: sonarqube/
+        dest: /opt/sonarqube/
+
+    - name: Set permissions for /opt/sonarqube
+      file:
+        path: /opt/sonarqube
+        owner: sonarqube
+        group: sonarqube
+        recurse: yes
+
+    - name: Set sonar.jdbc.username
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.jdbc.username='
+        line: 'sonar.jdbc.username={{ db_user }}'
+      register: sonar_jdbc_username
+      changed_when: sonar_jdbc_username.changed
+
+    - name: Set sonar.jdbc.password
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.jdbc.password='
+        line: 'sonar.jdbc.password={{ db_password }}'
+      register: sonar_jdbc_password  
+      changed_when: sonar_jdbc_password.changed
+
+    - name: Set sonar.jdbc.url
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.jdbc.url=jdbc:postgresql://localhost/sonarqube\?currentSchema=my_schema'
+        line: 'sonar.jdbc.url=jdbc:postgresql://localhost:5432/sonarqube'
+      register: sonar_jdbc_url
+      changed_when: sonar_jdbc_url.changed
+
+    - name: Uncomment sonar.search.javaOpts
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.search.javaOpts='
+        line: 'sonar.search.javaOpts=-Xmx512m -Xms512m -XX:MaxDirectMemorySize=256m -XX:+HeapDumpOnOutOfMemoryError'
+      register: sonar_search_javaOpts
+      changed_when: sonar_search_javaOpts.changed
+
+    - name: Set sonar.web.host
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.web.host='
+        line: 'sonar.web.host=127.0.0.1'
+      register: sonar_web_host
+      changed_when: sonar_web_host.changed
+
+    - name: Uncomment sonar.web.port
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.web.port='
+        line: 'sonar.web.port=9000'
+      register: sonar_web_port
+      changed_when: sonar_web_port.changed
+
+    - name: Set sonar.web.javaAdditionalOpts
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.web.javaAdditionalOpts='
+        line: 'sonar.web.javaAdditionalOpts=-server'
+      register: sonar_web_javaAdditionalOpts
+      changed_when: sonar_web_javaAdditionalOpts.changed
+
+    - name: Uncomment sonar.log.level
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.log.level='
+        line: 'sonar.log.level=INFO'
+      register: sonar_log_level
+      changed_when: sonar_log_level.changed
+
+    - name: Uncomment sonar.path.logs
+      lineinfile:
+        path: /opt/sonarqube/conf/sonar.properties
+        regexp: '^#sonar.path.logs='
+        line: 'sonar.path.logs=logs'
+      register: sonar_path_logs
+      changed_when: sonar_path_logs.changed
+
+    - name: Create sonarqube.service file
+      template:
+        src: sonarqube.service.j2
+        dest: /etc/systemd/system/sonarqube.service
+      notify: Reload systemd daemon
+
+    - name: Start sonarqube.service
+      systemd:
+        name: sonarqube.service
+        state: started
+        enabled: yes
+
+    - name: Check Nginx service status
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+    
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+
+    - name: Create SonarQube server blocks configuration
+      template:
+        src: sonarqube.conf.j2
+        dest: /etc/nginx/sites-available/sonarqube.conf
+      notify: Reload Nginx
+  
+    - name: Activate SonarQube server block configuration
+      file:
+        src: /etc/nginx/sites-available/sonarqube.conf
+        dest: /etc/nginx/sites-enabled/sonarqube.conf
+        state: link
+      notify: Reload Nginx
