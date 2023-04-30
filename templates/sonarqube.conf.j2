@@ -1,6 +1,7 @@
 server {
 
     listen 80;
+    server_name sonarqube.localhost;
     access_log /var/log/nginx/sonar.access.log;
     error_log /var/log/nginx/sonar.error.log;
     proxy_buffers 16 64k;
